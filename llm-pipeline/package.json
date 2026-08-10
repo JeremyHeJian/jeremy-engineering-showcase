@@ -1,0 +1,26 @@
+{
+  "name": "llm-pipeline",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Production LLM feature engineered so a hallucinated recommendation cannot reach a user.",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "evals": "tsx evals/run.ts",
+    "evals:dry": "tsx evals/run.ts --dry",
+    "evals:live": "tsx evals/run.ts --live"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/sdk": "^0.32.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}

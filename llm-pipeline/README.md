@@ -28,6 +28,33 @@ A 24-hour cache; a fully deterministic non-LLM fallback when the model errors or
 
 → [`reliability/`](./reliability/)
 
+## Running it
+
+```bash
+npm install
+npm test           # 20 tests: grounding filter, season logic, cache TTL,
+                   # rubric scoring, and the full pipeline (fallback paths,
+                   # hallucination drop, budget cap, cache hit)
+npm run evals      # run all 17 eval cases with a deterministic offline model
+npm run evals:dry  # print the in-season set per case, no model
+npm run evals:live # exercise the real Anthropic API (needs ANTHROPIC_API_KEY)
+npm run typecheck
+```
+
+The pipeline is real; the boundaries (the model, the database) are behind ports
+with in-memory adapters, so the whole thing — including the eval harness — runs
+and is tested **offline with no API key**. `anthropicModel()` is the production
+adapter; `fakeModel()` is the offline stand-in. Swapping the in-memory
+`PhenomenonSource`/`CacheStore`/`AuditLog` for the production Postgres adapters
+is the only change needed to run against a real database.
+
+```
+tool-schema/   schema.ts (forced-tool JSON Schema + Zod) · prompt.ts (versioned)
+grounding/     context.ts (retrieval port) · in-season.ts · validate.ts (filter)
+evals/         cases.ts (17 cases) · score.ts (rubric) · run.ts (harness)
+reliability/   pipeline.ts (orchestration) · llm.ts · cache.ts · fallback.ts · audit.ts
+```
+
 ## Notes on scope
 
 - Retrieval here is **SQL-grounded, not vector/RAG** — the data model is structured and small enough that exact retrieval beats similarity search. The guardrail patterns (grounding, filtering, evals, fallbacks) are identical to what a vector-based stack needs.

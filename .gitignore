@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Build / test output
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+*.log
+.idea/
+.vscode/
+
+# Local extraction scratch (never committed)
+_source/

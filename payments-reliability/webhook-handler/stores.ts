@@ -69,13 +69,18 @@ export class InMemoryStripeAccountStore implements StripeAccountStore {
 }
 
 // ── Processed-event ledger (idempotency) ────────────────────────────────────
-// Append-only record of every Stripe event id we've fully processed. The first
-// delivery of an event applies it and records the id; every later delivery of
-// the SAME id is recognised and skipped. In production this is a table with a
-// UNIQUE constraint on the event id — the DB itself enforces exactly-once.
+// Append-only record of every Stripe event id we've claimed. `claim` is
+// atomic: the first delivery of an event id wins and returns true; every later
+// delivery of the SAME id (including one racing the first) returns false and is
+// skipped. `release` undoes a claim if applying the event failed, so Stripe's
+// retry can reprocess it. In production this is a table with a UNIQUE constraint
+// on the event id — the INSERT itself is the atomic claim; a duplicate insert
+// hits the constraint (Prisma P2002 / Postgres 23505) and is caught as a no-op.
 export interface ProcessedEventStore {
-  has(eventId: string): Promise<boolean>;
-  add(eventId: string, meta: { type: string; created: number }): Promise<void>;
+  /** Atomically record the event id. Returns false if it was already claimed. */
+  claim(eventId: string, meta: { type: string; created: number }): Promise<boolean>;
+  /** Undo a claim so a failed event can be reprocessed on retry. */
+  release(eventId: string): Promise<void>;
 }
 
 export class InMemoryProcessedEventStore implements ProcessedEventStore {
@@ -83,13 +88,14 @@ export class InMemoryProcessedEventStore implements ProcessedEventStore {
 
   constructor(private readonly now: () => number = Date.now) {}
 
-  async has(eventId: string): Promise<boolean> {
-    return this.seen.has(eventId);
+  async claim(eventId: string, meta: { type: string; created: number }): Promise<boolean> {
+    if (this.seen.has(eventId)) return false; // constraint would reject the insert
+    this.seen.set(eventId, { ...meta, at: this.now() });
+    return true;
   }
 
-  async add(eventId: string, meta: { type: string; created: number }): Promise<void> {
-    if (this.seen.has(eventId)) return; // append-only, never overwrite
-    this.seen.set(eventId, { ...meta, at: this.now() });
+  async release(eventId: string): Promise<void> {
+    this.seen.delete(eventId);
   }
 }
 

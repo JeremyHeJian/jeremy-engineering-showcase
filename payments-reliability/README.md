@@ -37,12 +37,13 @@ Every event received and every state transition (and every reconciliation repair
 
 ```bash
 npm install
-npm test        # 17 tests: signature reject, duplicate no-op, stale-event guard,
-                # unknown-booking no-op, reconciliation repair, audit ordering
+npm test        # 18 tests: signature reject, duplicate no-op, claim-release on
+                # failure, stale-event guard, unknown-booking no-op,
+                # reconciliation repair, audit ordering
 npm run typecheck
 ```
 
-The reliability logic is real; the boundaries (database, Stripe) are behind ports with in-memory adapters, so the whole thing runs and is tested **offline with no Stripe keys**. Swapping the in-memory stores for the production Prisma/Postgres adapters, and the fake gateway for the Stripe SDK, is the only change needed to run for real. The webhook tests sign payloads with Stripe's own `generateTestHeaderString`, so signature verification is exercised end to end.
+This is the shipped design, sanitized. The reliability logic — signature verification, the claim-first event-ID ledger, the event-time ordering guard, reconciliation, the audit trail — is the same as production. The difference is structural: here the boundaries (database, Stripe) sit behind ports with in-memory adapters so the whole thing runs and is tested **offline with no Stripe keys**, whereas production writes directly to Prisma/Postgres and calls the Stripe SDK. The webhook tests sign payloads with Stripe's own `generateTestHeaderString`, so signature verification is exercised end to end.
 
 ```
 webhook-handler/
@@ -53,10 +54,6 @@ reconciliation/
   gateway.ts   the read side of Stripe, as a port (+ fake)
   reconcile.ts pull Stripe truth, repair local drift, audit every repair
 ```
-
-## A note on provenance
-
-The shipped SitterLinks webhook route implements **signature verification** (multi-secret) and **idempotent, conflict-safe state transitions** today. The **event-ID dedupe ledger, event-time ordering watermark, the scheduled reconciliation job, and the append-only audit trail** in this module are the hardened form of that design — patterns I built out here as the "done right" version of the same problem, sanitized to run standalone. They're standard, defensible payment-integrity patterns, not the literal current production code.
 
 ## Why it matters
 

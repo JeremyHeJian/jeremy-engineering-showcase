@@ -42,33 +42,37 @@ export async function handleStripeWebhook(
     type: event.type,
   });
 
-  // 2. Idempotency — a duplicate delivery of an event we've already processed is
-  //    acknowledged and skipped. Retries become no-ops, not double-applied state.
-  if (await deps.processedEvents.has(event.id)) {
+  // 2. Idempotency — claim the event id up front (atomic). A duplicate delivery
+  //    of an event we've already claimed, including one racing this request,
+  //    loses the claim and is acknowledged as a no-op — never double-applied.
+  const claimed = await deps.processedEvents.claim(event.id, {
+    type: event.type,
+    created: event.created,
+  });
+  if (!claimed) {
     await deps.audit.record({ kind: "duplicate", eventId: event.id, type: event.type });
     return { outcome: "duplicate", eventId: event.id, type: event.type };
   }
 
-  // 3. Dispatch (each branch applies its own event-time ordering guard).
-  let result: HandlerResult;
-  switch (event.type) {
-    case "checkout.session.completed":
-      result = await applyCheckoutCompleted(event, deps);
-      break;
-    case "account.updated":
-      result = await applyAccountUpdated(event, deps);
-      break;
-    default:
-      await deps.audit.record({ kind: "ignored", eventId: event.id, type: event.type });
-      result = { outcome: "ignored", eventId: event.id, type: event.type };
+  // 3. Dispatch (each branch applies its own event-time ordering guard). The
+  //    claim is kept for every non-error outcome — including "stale"/"noop" — so
+  //    the event is never reconsidered; reconciliation, not webhook replay,
+  //    repairs drift. If applying THROWS, we release the claim so Stripe's retry
+  //    can reprocess (the caller surfaces a 500).
+  try {
+    switch (event.type) {
+      case "checkout.session.completed":
+        return await applyCheckoutCompleted(event, deps);
+      case "account.updated":
+        return await applyAccountUpdated(event, deps);
+      default:
+        await deps.audit.record({ kind: "ignored", eventId: event.id, type: event.type });
+        return { outcome: "ignored", eventId: event.id, type: event.type };
+    }
+  } catch (err) {
+    await deps.processedEvents.release(event.id);
+    throw err;
   }
-
-  // 4. Record the event id as processed (idempotency ledger). We mark it
-  //    processed for every non-error outcome — including "stale"/"noop" — so it
-  //    is never reconsidered; reconciliation, not webhook replay, repairs drift.
-  await deps.processedEvents.add(event.id, { type: event.type, created: event.created });
-
-  return result;
 }
 
 // A stale event (older than the last one applied to this aggregate) must never

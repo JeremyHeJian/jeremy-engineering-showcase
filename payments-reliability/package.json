@@ -1,0 +1,21 @@
+{
+  "name": "payments-reliability",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Stripe webhook handling that stays correct when events arrive late, twice, or out of order.",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "stripe": "^17.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}

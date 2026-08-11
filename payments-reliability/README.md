@@ -14,9 +14,9 @@ Every incoming webhook is verified against Stripe's signing secret before anythi
 → [`webhook-handler/verify.ts`](./webhook-handler/verify.ts)
 
 ### 2. Idempotent event handling
-Handlers dedupe on Stripe's stable event ID: an event already processed is acknowledged and skipped. Retried and duplicate deliveries become no-ops instead of double-applied state changes. There's a second, state-level guard too — an already-paid booking is never re-paid even by a *different* event id.
+Every event is **claimed by its stable Stripe event ID before it's processed** — an atomic insert against a UNIQUE constraint. A duplicate delivery, *including one racing the first*, loses the claim and is acknowledged as a no-op; if applying then throws, the claim is released so Stripe's retry can reprocess. A second, state-level guard backs it: a booking is marked paid only if still unpaid, in one atomic conditional update, so it's never double-paid (or re-emailed) even by a *different* event id.
 
-→ [`webhook-handler/stores.ts`](./webhook-handler/stores.ts) (`ProcessedEventStore`) · [`handler.ts`](./webhook-handler/handler.ts)
+→ [`webhook-handler/stores.ts`](./webhook-handler/stores.ts) (`ProcessedEventStore.claim`, `BookingStore.markPaidIfUnpaid`) · [`handler.ts`](./webhook-handler/handler.ts)
 
 ### 3. Event-time ordering
 State transitions are ordered by the **event's own `created` timestamp**, not arrival time. Each aggregate carries a watermark of the last event applied; a stale event arriving after a newer one is dropped and cannot regress state.
@@ -49,7 +49,7 @@ This is the shipped design, sanitized. The reliability logic — signature verif
 webhook-handler/
   verify.ts    signature verification (multi-secret)
   stores.ts    ports + in-memory: bookings, accounts, processed-events, audit
-  handler.ts   verify → dedupe → order → apply → audit
+  handler.ts   verify → claim → order → apply → audit
 reconciliation/
   gateway.ts   the read side of Stripe, as a port (+ fake)
   reconcile.ts pull Stripe truth, repair local drift, audit every repair

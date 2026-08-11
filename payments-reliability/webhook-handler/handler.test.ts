@@ -190,7 +190,8 @@ describe("claim release on failure (so Stripe's retry can reprocess)", () => {
     // claim and rethrows (the route would surface a 500 and Stripe retries).
     const throwingBookings: BookingStore = {
       get: async () => ({ ...seedBooking }),
-      update: async () => {
+      update: async () => undefined,
+      markPaidIfUnpaid: async () => {
         throw new Error("db down");
       },
       all: async () => [],

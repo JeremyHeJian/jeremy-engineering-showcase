@@ -8,6 +8,15 @@ import type { Booking, StripeAccount } from "./types";
 export interface BookingStore {
   get(id: string): Promise<Booking | undefined>;
   update(id: string, patch: Partial<Booking>): Promise<Booking | undefined>;
+  /**
+   * Atomically apply `patch` (mark paid) only if the booking is still unpaid.
+   * Returns false if it was already paid. In production this is a single
+   * conditional update — `updateMany({ where: { id, paidAt: null }, data })` —
+   * so the compare and the write are one statement with no read-then-write gap;
+   * a concurrent second delivery for the same booking finds it already paid and
+   * no-ops. Mirror of `ProcessedEventStore.claim`, one level down.
+   */
+  markPaidIfUnpaid(id: string, patch: Partial<Booking>): Promise<boolean>;
   all(): Promise<Booking[]>;
 }
 
@@ -29,6 +38,13 @@ export class InMemoryBookingStore implements BookingStore {
     const next = { ...b, ...patch };
     this.rows.set(id, next);
     return { ...next };
+  }
+
+  async markPaidIfUnpaid(id: string, patch: Partial<Booking>): Promise<boolean> {
+    const b = this.rows.get(id);
+    if (!b || b.paidAt) return false; // compare — and, with no await before the
+    this.rows.set(id, { ...b, ...patch }); // write, the two are one atomic step
+    return true;
   }
 
   async all(): Promise<Booking[]> {

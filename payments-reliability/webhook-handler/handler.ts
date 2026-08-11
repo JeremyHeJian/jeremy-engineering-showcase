@@ -13,7 +13,7 @@ import { verifyStripeSignature } from "./verify";
 // Correct payment state under LATE, DUPLICATED, and OUT-OF-ORDER delivery. The
 // pipeline for every delivery:
 //
-//   verify signature → dedupe on event id → order by event time → apply → audit
+//   verify signature → claim event id → order by event time → apply → audit
 //
 // Framework-agnostic core of the production Next.js route (app/api/stripe/
 // webhooks/route.ts). The route is a thin adapter: read the raw body + the
@@ -106,25 +106,29 @@ async function applyCheckoutCompleted(
     return { outcome: "stale", ...base, detail: "older than last applied event" };
   }
 
-  // State-level idempotency: already paid → advance the ordering watermark but
-  // don't re-apply (no duplicate email, no reset paidAt).
-  if (booking.paidAt) {
-    await deps.bookings.update(bookingId, { lastEventCreated: event.created });
-    await deps.audit.record({ kind: "noop", ...base, target: bookingId, detail: "already paid" });
-    return { outcome: "noop", ...base, detail: "already paid" };
-  }
-
   const paymentIntentId =
     typeof session.payment_intent === "string"
       ? session.payment_intent
       : (session.payment_intent?.id ?? undefined);
 
-  await deps.bookings.update(bookingId, {
+  // State-level idempotency, atomically: mark paid only if still unpaid. The
+  // compare and the write are a single step (see BookingStore.markPaidIfUnpaid),
+  // mirroring the production `updateMany({ where: { id, paidAt: null } })` — so
+  // there is no read-then-write window a concurrent second delivery could slip
+  // through, and a booking is never double-paid or re-emailed.
+  const applied = await deps.bookings.markPaidIfUnpaid(bookingId, {
     status: "CONFIRMED",
     paidAt: new Date(event.created * 1000),
     stripePaymentIntentId: paymentIntentId,
     lastEventCreated: event.created,
   });
+
+  if (!applied) {
+    // Already paid → advance the ordering watermark but don't re-apply.
+    await deps.bookings.update(bookingId, { lastEventCreated: event.created });
+    await deps.audit.record({ kind: "noop", ...base, target: bookingId, detail: "already paid" });
+    return { outcome: "noop", ...base, detail: "already paid" };
+  }
 
   await deps.audit.record({
     kind: "applied",

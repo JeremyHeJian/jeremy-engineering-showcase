@@ -47,7 +47,7 @@ export type StripeAccount = {
 // deliveries that are already handled or intentionally skipped.
 export type HandlerOutcome =
   | "applied" // state changed
-  | "duplicate" // event id already processed (idempotent no-op)
+  | "duplicate" // event id already claimed (idempotent no-op)
   | "stale" // an older event arrived after a newer one (ordering guard)
   | "ignored" // event type we don't handle
   | "noop"; // handled type, but nothing to do (missing/unknown target)

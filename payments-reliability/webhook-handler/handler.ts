@@ -13,7 +13,7 @@ import { verifyStripeSignature } from "./verify";
 // Correct payment state under LATE, DUPLICATED, and OUT-OF-ORDER delivery. The
 // pipeline for every delivery:
 //
-//   verify signature → dedupe on event id → order by event time → apply → audit
+//   verify signature → claim event id → order by event time → apply → audit
 //
 // Framework-agnostic core of the production Next.js route (app/api/stripe/
 // webhooks/route.ts). The route is a thin adapter: read the raw body + the
@@ -42,33 +42,37 @@ export async function handleStripeWebhook(
     type: event.type,
   });
 
-  // 2. Idempotency — a duplicate delivery of an event we've already processed is
-  //    acknowledged and skipped. Retries become no-ops, not double-applied state.
-  if (await deps.processedEvents.has(event.id)) {
+  // 2. Idempotency — claim the event id up front (atomic). A duplicate delivery
+  //    of an event we've already claimed, including one racing this request,
+  //    loses the claim and is acknowledged as a no-op — never double-applied.
+  const claimed = await deps.processedEvents.claim(event.id, {
+    type: event.type,
+    created: event.created,
+  });
+  if (!claimed) {
     await deps.audit.record({ kind: "duplicate", eventId: event.id, type: event.type });
     return { outcome: "duplicate", eventId: event.id, type: event.type };
   }
 
-  // 3. Dispatch (each branch applies its own event-time ordering guard).
-  let result: HandlerResult;
-  switch (event.type) {
-    case "checkout.session.completed":
-      result = await applyCheckoutCompleted(event, deps);
-      break;
-    case "account.updated":
-      result = await applyAccountUpdated(event, deps);
-      break;
-    default:
-      await deps.audit.record({ kind: "ignored", eventId: event.id, type: event.type });
-      result = { outcome: "ignored", eventId: event.id, type: event.type };
+  // 3. Dispatch (each branch applies its own event-time ordering guard). The
+  //    claim is kept for every non-error outcome — including "stale"/"noop" — so
+  //    the event is never reconsidered; reconciliation, not webhook replay,
+  //    repairs drift. If applying THROWS, we release the claim so Stripe's retry
+  //    can reprocess (the caller surfaces a 500).
+  try {
+    switch (event.type) {
+      case "checkout.session.completed":
+        return await applyCheckoutCompleted(event, deps);
+      case "account.updated":
+        return await applyAccountUpdated(event, deps);
+      default:
+        await deps.audit.record({ kind: "ignored", eventId: event.id, type: event.type });
+        return { outcome: "ignored", eventId: event.id, type: event.type };
+    }
+  } catch (err) {
+    await deps.processedEvents.release(event.id);
+    throw err;
   }
-
-  // 4. Record the event id as processed (idempotency ledger). We mark it
-  //    processed for every non-error outcome — including "stale"/"noop" — so it
-  //    is never reconsidered; reconciliation, not webhook replay, repairs drift.
-  await deps.processedEvents.add(event.id, { type: event.type, created: event.created });
-
-  return result;
 }
 
 // A stale event (older than the last one applied to this aggregate) must never
@@ -102,25 +106,29 @@ async function applyCheckoutCompleted(
     return { outcome: "stale", ...base, detail: "older than last applied event" };
   }
 
-  // State-level idempotency: already paid → advance the ordering watermark but
-  // don't re-apply (no duplicate email, no reset paidAt).
-  if (booking.paidAt) {
-    await deps.bookings.update(bookingId, { lastEventCreated: event.created });
-    await deps.audit.record({ kind: "noop", ...base, target: bookingId, detail: "already paid" });
-    return { outcome: "noop", ...base, detail: "already paid" };
-  }
-
   const paymentIntentId =
     typeof session.payment_intent === "string"
       ? session.payment_intent
       : (session.payment_intent?.id ?? undefined);
 
-  await deps.bookings.update(bookingId, {
+  // State-level idempotency, atomically: mark paid only if still unpaid. The
+  // compare and the write are a single step (see BookingStore.markPaidIfUnpaid),
+  // mirroring the production `updateMany({ where: { id, paidAt: null } })` — so
+  // there is no read-then-write window a concurrent second delivery could slip
+  // through, and a booking is never double-paid or re-emailed.
+  const applied = await deps.bookings.markPaidIfUnpaid(bookingId, {
     status: "CONFIRMED",
     paidAt: new Date(event.created * 1000),
     stripePaymentIntentId: paymentIntentId,
     lastEventCreated: event.created,
   });
+
+  if (!applied) {
+    // Already paid → advance the ordering watermark but don't re-apply.
+    await deps.bookings.update(bookingId, { lastEventCreated: event.created });
+    await deps.audit.record({ kind: "noop", ...base, target: bookingId, detail: "already paid" });
+    return { outcome: "noop", ...base, detail: "already paid" };
+  }
 
   await deps.audit.record({
     kind: "applied",

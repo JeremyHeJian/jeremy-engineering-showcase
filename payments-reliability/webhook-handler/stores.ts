@@ -8,6 +8,15 @@ import type { Booking, StripeAccount } from "./types";
 export interface BookingStore {
   get(id: string): Promise<Booking | undefined>;
   update(id: string, patch: Partial<Booking>): Promise<Booking | undefined>;
+  /**
+   * Atomically apply `patch` (mark paid) only if the booking is still unpaid.
+   * Returns false if it was already paid. In production this is a single
+   * conditional update — `updateMany({ where: { id, paidAt: null }, data })` —
+   * so the compare and the write are one statement with no read-then-write gap;
+   * a concurrent second delivery for the same booking finds it already paid and
+   * no-ops. Mirror of `ProcessedEventStore.claim`, one level down.
+   */
+  markPaidIfUnpaid(id: string, patch: Partial<Booking>): Promise<boolean>;
   all(): Promise<Booking[]>;
 }
 
@@ -29,6 +38,13 @@ export class InMemoryBookingStore implements BookingStore {
     const next = { ...b, ...patch };
     this.rows.set(id, next);
     return { ...next };
+  }
+
+  async markPaidIfUnpaid(id: string, patch: Partial<Booking>): Promise<boolean> {
+    const b = this.rows.get(id);
+    if (!b || b.paidAt) return false; // compare — and, with no await before the
+    this.rows.set(id, { ...b, ...patch }); // write, the two are one atomic step
+    return true;
   }
 
   async all(): Promise<Booking[]> {
@@ -69,13 +85,18 @@ export class InMemoryStripeAccountStore implements StripeAccountStore {
 }
 
 // ── Processed-event ledger (idempotency) ────────────────────────────────────
-// Append-only record of every Stripe event id we've fully processed. The first
-// delivery of an event applies it and records the id; every later delivery of
-// the SAME id is recognised and skipped. In production this is a table with a
-// UNIQUE constraint on the event id — the DB itself enforces exactly-once.
+// Append-only record of every Stripe event id we've claimed. `claim` is
+// atomic: the first delivery of an event id wins and returns true; every later
+// delivery of the SAME id (including one racing the first) returns false and is
+// skipped. `release` undoes a claim if applying the event failed, so Stripe's
+// retry can reprocess it. In production this is a table with a UNIQUE constraint
+// on the event id — the INSERT itself is the atomic claim; a duplicate insert
+// hits the constraint (Prisma P2002 / Postgres 23505) and is caught as a no-op.
 export interface ProcessedEventStore {
-  has(eventId: string): Promise<boolean>;
-  add(eventId: string, meta: { type: string; created: number }): Promise<void>;
+  /** Atomically record the event id. Returns false if it was already claimed. */
+  claim(eventId: string, meta: { type: string; created: number }): Promise<boolean>;
+  /** Undo a claim so a failed event can be reprocessed on retry. */
+  release(eventId: string): Promise<void>;
 }
 
 export class InMemoryProcessedEventStore implements ProcessedEventStore {
@@ -83,13 +104,14 @@ export class InMemoryProcessedEventStore implements ProcessedEventStore {
 
   constructor(private readonly now: () => number = Date.now) {}
 
-  async has(eventId: string): Promise<boolean> {
-    return this.seen.has(eventId);
+  async claim(eventId: string, meta: { type: string; created: number }): Promise<boolean> {
+    if (this.seen.has(eventId)) return false; // constraint would reject the insert
+    this.seen.set(eventId, { ...meta, at: this.now() });
+    return true;
   }
 
-  async add(eventId: string, meta: { type: string; created: number }): Promise<void> {
-    if (this.seen.has(eventId)) return; // append-only, never overwrite
-    this.seen.set(eventId, { ...meta, at: this.now() });
+  async release(eventId: string): Promise<void> {
+    this.seen.delete(eventId);
   }
 }
 

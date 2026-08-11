@@ -9,13 +9,13 @@ Two deep-dives from products I built and operate solo, end to end:
 
 Both products: Next.js / TypeScript / React on the front, Node & Python services behind, PostgreSQL underneath, deployed with CI/CD (GitHub Actions, Docker) and monitored in production (Sentry, PostHog).
 
-**Why this repo exists:** my main products' repositories stay private (one of them runs live payments), but the engineering decisions are the interesting part — so the two modules here are sanitized extractions of that work, with write-ups of the problems they solve. The **LLM pipeline** is a direct extraction of the shipped `lib/today/` feature; the **payments** module is the shipped webhook layer plus the hardened form of its reliability design (each module's README says exactly what is shipped vs. hardened).
+**Why this repo exists:** my main products' repositories stay private (one of them runs live payments), but the engineering decisions are the interesting part — so the two modules here are sanitized extractions of that work, with write-ups of the problems they solve. Both are extractions of shipped code: the **LLM pipeline** from `lib/today/`, the **payments** module from the live Stripe webhook layer.
 
 **Both modules run and are tested standalone** — external boundaries (Anthropic, Stripe, Postgres) sit behind ports with in-memory adapters, so `npm install && npm test` is green with no API keys or database. CI (GitHub Actions) typechecks and tests both on every push.
 
 ```bash
 cd llm-pipeline        && npm install && npm test   # 20 tests + a 17-case eval harness
-cd payments-reliability && npm install && npm test   # 17 tests
+cd payments-reliability && npm install && npm test   # 18 tests
 ```
 
 - Contact: jeremyhejian@gmail.com · Vancouver, BC

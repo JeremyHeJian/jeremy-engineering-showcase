@@ -7,6 +7,7 @@ import {
   InMemoryStripeAccountStore,
   InMemoryProcessedEventStore,
   InMemoryAuditLog,
+  type BookingStore,
 } from "./stores";
 import type { Booking, StripeAccount } from "./types";
 
@@ -177,6 +178,33 @@ describe("idempotency (duplicated delivery)", () => {
     expect(res.outcome).toBe("noop");
     expect(res.detail).toContain("already paid");
     expect((await bookings.get("bk_1"))?.paidAt).toEqual(paidAt);
+  });
+});
+
+describe("claim release on failure (so Stripe's retry can reprocess)", () => {
+  it("releases the event-id claim when applying throws, then a retry applies", async () => {
+    const evt = signed(checkoutEvent({ id: "evt_boom", created: 100, bookingId: "bk_1" }));
+    const processedEvents = new InMemoryProcessedEventStore();
+
+    // First delivery: the booking store fails mid-apply → handler releases the
+    // claim and rethrows (the route would surface a 500 and Stripe retries).
+    const throwingBookings: BookingStore = {
+      get: async () => ({ ...seedBooking }),
+      update: async () => undefined,
+      markPaidIfUnpaid: async () => {
+        throw new Error("db down");
+      },
+      all: async () => [],
+    };
+    await expect(
+      handleStripeWebhook(evt.rawBody, evt.signature, { ...deps, processedEvents, bookings: throwingBookings }),
+    ).rejects.toThrow("db down");
+
+    // Retry of the SAME event id with a healthy store: NOT a duplicate — the
+    // claim was released — so it applies.
+    const res = await handleStripeWebhook(evt.rawBody, evt.signature, { ...deps, processedEvents });
+    expect(res.outcome).toBe("applied");
+    expect((await bookings.get("bk_1"))?.paidAt).not.toBeUndefined();
   });
 });
 
